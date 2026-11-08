@@ -1,7 +1,7 @@
 {
   "name": "vibesai-openai",
   "version": "1.0.0",
-  "description": "OpenAI-compatible REST API for vibes.ai \u2014 TypeScript, deployable free on Cloudflare Workers, Node, Deno, Bun, or Docker.",
+  "description": "OpenAI-compatible REST API for vibes.ai — TypeScript, deployable free on Cloudflare Workers, Node, Deno, Bun, or Docker.",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
@@ -10,7 +10,8 @@
     "start:node": "tsx src/node.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx test/smoke.ts",
-    "test:routes": "tsx test/verify-fix.ts"
+    "test:routes": "tsx test/verify-fix.ts",
+    "test:drm": "tsx test/drm-vectors.ts"
   },
   "keywords": [
     "vibes.ai",
@@ -26,7 +27,9 @@
     "node": ">=18"
   },
   "dependencies": {
-    "hono": "^4.6.14"
+    "@types/ws": "^8.18.2",
+    "hono": "^4.6.14",
+    "ws": "^8.22.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241224.0",

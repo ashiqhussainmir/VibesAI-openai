@@ -22,3 +22,10 @@ VIBES_API_KEY=""
 # Example: "ps_n=1; ps_l=1; datr=Bxxx...; fs=1; locale=en_GB"
 # Setting it automatically enables auto re-login (no other flag needed).
 AUTH_META_COOKIES=""
+
+# TTS fallback policy for /v1/audio/speech (vibes.ai PlayAI is down often —
+# "403 Facebook expired access token" is a vibes.ai server-side outage):
+#   auto (default) — vibes.ai → Edge TTS (400+ neural voices) → Google Translate TTS
+#   off            — vibes.ai only (returns 503 during its outages)
+#   only           — skip vibes.ai, use the fallback engines directly
+TTS_FALLBACK="auto"

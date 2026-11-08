@@ -27,8 +27,8 @@ Point any OpenAI SDK / tool at this server and use vibes.ai's video generation, 
 | `POST /v1/images/generations` | DALL-E-style image generation (sync, `url` or `b64_json`) |
 | `POST /v1/images/edits` | Image editing — multipart (OpenAI SDK) **or** JSON (`image` / `images: [{url}]` as data/https URL) |
 | `POST /v1/images/generations/edit` | Same handler, the route the z-ai SDK (`zai.images.generations.edit`) posts to |
-| `POST /v1/audio/speech` | OpenAI TTS-style speech synthesis (41 PlayAI voices) |
-| `GET /v1/audio/voices` | Voice catalog (convenience extra) |
+| `POST /v1/audio/speech` | OpenAI TTS-style speech synthesis — vibes.ai PlayAI with automatic fallback to Edge TTS (400+ neural voices) and Google Translate TTS when vibes.ai's backend is down |
+| `GET /v1/audio/voices` | Voice catalog across all three engines (`engine` field per voice) |
 | `ALL /vibes/*` | **Raw passthrough** to the entire vibes.ai API (projects, batches, ingredients, moodboards, music, lipsync, exports, share links…) |
 
 Extras: `GET /health`, `GET /health/auth` (session check), OpenAI-style JSON errors everywhere, CORS enabled.
@@ -80,6 +80,7 @@ You get `https://vibesai-openai.<your-subdomain>.workers.dev`. The free tier (10
 | `VIBES_META_SESSION` | yes* | Your vibes.ai `meta_session` cookie (server-side session). Get it from DevTools → Application → Cookies → `vibes.ai`. |
 | `VIBES_API_KEY` | no | If set, clients must send this as `Bearer` token; the vibes cookie stays hidden server-side. If unset, **the Bearer token itself is the vibes cookie** (per-user auth). |
 | `AUTH_META_COOKIES` | no | auth.meta.com cookie string — enables automatic OIDC re-login when the vibes session expires (see below). |
+| `TTS_FALLBACK` | no | TTS fallback policy: `auto` (default) — vibes.ai → Edge TTS → Google Translate TTS; `off` — vibes.ai only; `only` — skip vibes.ai, use fallback engines directly. |
 | `VIBES_BASE_URL` | no | Override upstream (default `https://vibes.ai`). |
 | `CORS_ORIGIN` | no | Reserved for CORS restriction (default: allow all). |
 
@@ -115,6 +116,37 @@ vibes.ai sessions expire after ~30 min of inactivity. Two mitigations:
 2. Set `AUTH_META_COOKIES` (auth.meta.com cookies from DevTools) and the proxy replays the Meta OIDC redirect chain to obtain a fresh `meta_session` automatically on 401s.
 
 Step-by-step instructions for both cookies: **[COOKIES.md](COOKIES.md)**.
+
+### TTS: three engines, always-on fallback
+
+vibes.ai's PlayAI TTS periodically goes down server-side with `403 Facebook expired access token` — during those outages even the vibes.ai website itself can't synthesize audio. `/v1/audio/speech` therefore chains engines:
+
+1. **vibes.ai PlayAI** — 41 studio voices (primary, used whenever vibes.ai is healthy)
+2. **Edge TTS** (Microsoft neural) — 400+ voices, keyless, near-instant
+3. **Google Translate TTS** — keyless, every language, always available
+
+The engine that served your request is in the **`X-TTS-Engine`** response header (`vibes` | `edge-tts` | `gtts`), so you always know what you got. Fallbacks also add `X-TTS-Voice` and `X-TTS-Note`.
+
+```bash
+# OpenAI-style request — same call regardless of engine
+curl http://localhost:8787/v1/audio/speech \
+  -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"model":"vibes-tts","voice":"alloy","input":"Hello!"}' \
+  -o speech.mp3 -D - | grep -i x-tts-engine
+
+# Pick a fallback engine explicitly (skips vibes.ai):
+#   voice: "en-US-JennyNeural"  → Edge TTS (any xx-XX-NameNeural id)
+#   voice: "gtts-ja"            → Google Translate TTS (gtts-<lang>)
+```
+
+Controls:
+
+- `TTS_FALLBACK=auto` (default) — try vibes.ai, fall back on failure
+- `TTS_FALLBACK=off` — vibes.ai only; surface its errors (503 during FB-token outages)
+- `TTS_FALLBACK=only` — skip vibes.ai entirely (lowest latency while it's down)
+- `/v1/audio/voices` lists all voices with an `engine` field per entry
+
+Runtime support: Edge TTS uses a custom-header WebSocket — Node/Bun use the `ws` package (works out of the box), **deployed** Cloudflare Workers use fetch-upgrade (documented Workers feature). `wrangler dev --local` (miniflare) can't open external WebSockets, so local dev falls back to GTTS; the deployed worker gets full Edge quality. `speed` is applied on vibes/Edge (prosody rate). Fallback engines always return MP3 regardless of `response_format`.
 
 ## Usage with OpenAI SDKs
 
@@ -222,13 +254,21 @@ npm run dev                           # wrangler dev (Workers runtime)
 ```
 src/
 ├── index.ts        # Cloudflare Workers entrypoint
-├── node.ts         # Node/Bun/Deno entrypoint
+├── node.ts         # Node/Bun/Deno entrypoint (installs the `ws` TTS transport)
 ├── app.ts          # Hono app factory: auth, CORS, routing, errors
 ├── vibes.ts        # VibesClient — fetch-based port of the Python client
 ├── openai.ts       # OpenAI-compatible handlers
 ├── passthrough.ts  # /vibes/* raw proxy
-└── utils.ts        # UUIDv7, mg_request_id, base64 helpers
-test/smoke.ts       # live smoke test against vibes.ai
+├── imagedit.ts     # content-hash → image_ent_id registry (generate → edit chains)
+├── utils.ts        # UUIDv7, mg_request_id, base64 helpers
+└── tts/            # /v1/audio/speech engines
+    ├── index.ts    #   orchestration: vibes → edge → gtts chain + voice maps
+    ├── drm.ts      #   Sec-MS-GEC v2 token (Edge TTS auth), vector-tested
+    ├── edge.ts     #   Edge TTS synthesis (websocket + SSML + MP3 frames)
+    ├── transport.ts#   fetch-upgrade WebSocket (Workers) + transport registry
+    ├── ws-node.ts  #   `ws`-based WebSocket (Node/Bun)
+    └── gtts.ts     #   Google Translate TTS (chunked, keyless)
+test/               # drm-vectors.ts (CI), verify-fix.ts (CI), smoke.ts (live)
 examples/           # OpenAI SDK snippets (Python + JS)
 ```
 

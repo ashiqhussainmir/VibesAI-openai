@@ -8,6 +8,12 @@
  */
 import { serve } from "@hono/node-server";
 import { createApp, type Env } from "./app.js";
+import { setEdgeTransport } from "./tts/transport.js";
+import { nodeWsTransport } from "./tts/ws-node.js";
+
+// Node's built-in WebSocket can't set custom headers, which the Edge TTS
+// fallback needs — use the `ws` package instead.
+setEdgeTransport(nodeWsTransport);
 
 const port = Number(process.env.PORT ?? 8787);
 

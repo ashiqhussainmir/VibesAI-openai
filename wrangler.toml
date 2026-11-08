@@ -13,5 +13,8 @@ compatibility_date = "2025-01-01"
 [vars]
 # CORS_ORIGIN = "*"
 # VIBES_BASE_URL = "https://vibes.ai"
+# TTS_FALLBACK = "auto"   # auto (default) | off | only — /v1/audio/speech
+#                          # falls back to Edge TTS + Google Translate TTS
+#                          # when vibes.ai's PlayAI backend is down.
 
 # Free plan is enough: this proxy streams responses and never stores state.

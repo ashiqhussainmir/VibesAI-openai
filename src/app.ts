@@ -27,6 +27,10 @@ export interface Env {
   AUTH_META_COOKIES?: string;
   VIBES_BASE_URL?: string;
   CORS_ORIGIN?: string;
+  /** TTS fallback policy: "auto" (default) | "off" | "only". */
+  TTS_FALLBACK?: string;
+  /** Legacy alias: any non-zero value disables the TTS fallback. */
+  VIBES_TTS_STRICT?: string;
   [k: string]: string | undefined;
 }
 
@@ -36,6 +40,8 @@ export type AppEnv = {
     vibesClient: VibesClient;
     vibesMetaSession: string;
     vibesBaseUrl: string;
+    /** Raw env for TTS fallback mode resolution. */
+    ttsEnv: Record<string, string | undefined>;
   };
 };
 
@@ -105,6 +111,7 @@ function authMiddleware(envSource: EnvSource) {
     c.set("vibesClient", getClient(metaSession, env));
     c.set("vibesMetaSession", metaSession);
     c.set("vibesBaseUrl", env.VIBES_BASE_URL || DEFAULT_BASE_URL);
+    c.set("ttsEnv", env as Record<string, string | undefined>);
     await next();
   };
 }

@@ -18,6 +18,8 @@ import type { AppContext } from "./app.js";
 import { streamSSE } from "hono/streaming";
 import { toBase64, fromBase64 } from "./utils.js";
 import { afterResponse, lookupEntId, registerGeneratedImage } from "./imagedit.js";
+import { EDGE_VOICES, isEdgeVoice, parseTtsMode, resolveVoice, synthesizeFallback } from "./tts/index.js";
+import { GTTS_LANGUAGES, parseGttsVoice } from "./tts/gtts.js";
 import {
   AspectRatio,
   ImageModel,
@@ -717,26 +719,10 @@ export async function handleImageEdit(c: AppContext) {
 // -----------------------------------------------------------------------
 // Audio / TTS
 // -----------------------------------------------------------------------
-/** OpenAI voice names → vibes.ai PlayAI voice ids. */
-const VOICE_MAP: Record<string, string> = {
-  alloy: "play_ai_Marisol",
-  echo: "play_ai_Nigel",
-  fable: "play_ai_1P_Abraham_Lincoln",
-  onyx: "play_ai_Thunder",
-  nova: "play_ai_Celeste",
-  shimmer: "play_ai_1P_Seraphine",
-  coral: "play_ai_Scarlett",
-  sage: "play_ai_Jacile",
-  ash: "play_ai_Conor",
-  ballad: "play_ai_Giulia",
-  verse: "play_ai_Rumi",
-};
-
-function resolveVoice(voice: string | undefined): string {
-  if (!voice) return VOICE_MAP.alloy;
-  if (voice.startsWith("play_ai_")) return voice;
-  return VOICE_MAP[voice] ?? VOICE_MAP.alloy;
-}
+// Voice resolution lives in src/tts/index.ts: OpenAI names map to vibes
+// PlayAI ids (primary) AND Edge neural voices (fallback); explicit Edge
+// ("en-US-JennyNeural") and GTTS ("gtts-ja") voices go straight to the
+// fallback engines.
 
 export async function handleSpeech(c: AppContext) {
   const client: VibesClient = c.get("vibesClient");
@@ -750,46 +736,112 @@ export async function handleSpeech(c: AppContext) {
     return c.json(openaiError(400, "`input` (text) is required", "invalid_request_error"), 400);
   }
 
-  const voice = resolveVoice(req.voice);
+  const resolved = resolveVoice(req.voice);
   const format = (req.response_format ?? "mp3").toLowerCase();
+  const mode = parseTtsMode(c.get("ttsEnv") ?? {});
+  // An explicit fallback-engine voice ("en-US-JennyNeural", "gtts", "gtts-ja")
+  // skips vibes.ai entirely.
+  const explicitFallback = isEdgeVoice(req.voice) || parseGttsVoice(req.voice) !== null;
+
+  // -------- primary: vibes.ai PlayAI TTS (41 studio voices) ----------------
+  if (mode !== "only" && !explicitFallback) {
+    try {
+      const resp = await client.tts(req.input, resolved.vibes, format === "mp3" ? "mp3" : format, req.language);
+      const bytes = Uint8Array.from(atob(resp.audioBase64), (ch) => ch.charCodeAt(0));
+      const contentType = resp.contentType ?? (format === "mp3" ? "audio/mpeg" : `audio/${format}`);
+      return new Response(bytes, {
+        headers: {
+          "Content-Type": contentType,
+          "Content-Disposition": `attachment; filename="speech.${format}"`,
+          "X-TTS-Engine": "vibes",
+          "X-Vibes-Voice": resolved.vibes,
+        },
+      });
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      if (mode === "off") {
+        if (msg.includes("Facebook expired access token")) {
+          return c.json(
+            openaiError(
+              503,
+              "vibes.ai TTS backend is temporarily unavailable (its server-side Facebook access token rotates; retry in a few minutes). Fallback engines are disabled (TTS_FALLBACK=off).",
+              "api_error",
+              "upstream_tts_unavailable",
+            ),
+            503,
+          );
+        }
+        return c.json(openaiError(502, `TTS failed: ${msg}`), 502);
+      }
+      // vibes.ai failed — fall through to the fallback engines
+    }
+  }
+
+  // -------- fallback: Edge TTS → Google Translate TTS ----------------------
   try {
-    const resp = await client.tts(req.input, voice, format === "mp3" ? "mp3" : format, req.language);
-    const bytes = Uint8Array.from(atob(resp.audioBase64), (ch) => ch.charCodeAt(0));
-    const contentType = resp.contentType ?? (format === "mp3" ? "audio/mpeg" : `audio/${format}`);
-    return new Response(bytes, {
+    const out = await synthesizeFallback(req.input, req.voice, {
+      language: req.language,
+      speed: typeof req.speed === "number" ? req.speed : undefined,
+    });
+    return new Response(out.audio, {
       headers: {
-        "Content-Type": contentType,
-        "Content-Disposition": `attachment; filename="speech.${format}"`,
-        "X-Vibes-Voice": voice,
+        // Fallback engines output MP3 (24 kHz mono).
+        "Content-Type": "audio/mpeg",
+        "Content-Disposition": `attachment; filename="speech.mp3"`,
+        "X-TTS-Engine": out.engine,
+        "X-TTS-Voice": out.voice,
+        "X-TTS-Note": "served by fallback engine (vibes.ai TTS unavailable or bypassed)",
       },
     });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    if (msg.includes("Facebook expired access token")) {
-      return c.json(
-        openaiError(
-          503,
-          "vibes.ai TTS backend is temporarily unavailable (its server-side Facebook access token rotates; retry in a few minutes).",
-          "api_error",
-          "upstream_tts_unavailable",
-        ),
-        503,
-      );
-    }
     return c.json(openaiError(502, `TTS failed: ${msg}`), 502);
   }
 }
 
 export async function handleListVoices(c: AppContext) {
   const client: VibesClient = c.get("vibesClient");
+
+  // Fallback engines are always listable — they answer when vibes.ai's
+  // PlayAI backend is down (the "403 Facebook expired access token" outage).
+  const fallbackVoices = [
+    ...EDGE_VOICES.map((v) => ({
+      id: v.id,
+      name: v.name,
+      description: `${v.locale} • ${v.gender} (Edge neural fallback)`,
+      engine: "edge-tts",
+    })),
+    ...GTTS_LANGUAGES.map((l) => ({
+      id: l.id,
+      name: `Google Translate (${l.language})`,
+      description: `${l.language} (GTTS fallback)`,
+      engine: "gtts",
+    })),
+  ];
+
   try {
     const voices = await client.listVoices(100);
     return c.json({
       object: "list",
-      data: voices.map((v: any) => ({ id: v.id, name: v.name, description: v.description, sample_url: v.sample })),
-      openai_voice_aliases: VOICE_MAP,
+      data: [
+        ...voices.map((v: any) => ({ id: v.id, name: v.name, description: v.description, sample_url: v.sample, engine: "vibes" })),
+        ...fallbackVoices,
+      ],
+      openai_voice_aliases: {
+        alloy: "play_ai_Marisol", echo: "play_ai_Nigel", fable: "play_ai_1P_Abraham_Lincoln",
+        onyx: "play_ai_Thunder", nova: "play_ai_Celeste", shimmer: "play_ai_1P_Seraphine",
+        coral: "play_ai_Scarlett", sage: "play_ai_Jacile", ash: "play_ai_Conor",
+        ballad: "play_ai_Giulia", verse: "play_ai_Rumi",
+      },
+      note: "engine 'vibes' = vibes.ai PlayAI (primary). When vibes.ai TTS is unavailable, /v1/audio/speech automatically falls back to 'edge-tts' (any xx-XX-NameNeural voice id) and 'gtts' (gtts-<lang>).",
     });
   } catch (e: any) {
-    return c.json(openaiError(502, `voice listing failed: ${e?.message ?? String(e)}`), 502);
+    // vibes.ai voice listing failed — still offer the fallback voices.
+    return c.json({
+      object: "list",
+      data: fallbackVoices,
+      openai_voice_aliases: {},
+      note: `vibes.ai voice listing failed (${e?.message ?? String(e)}); showing fallback engines only.`,
+    });
   }
 }
