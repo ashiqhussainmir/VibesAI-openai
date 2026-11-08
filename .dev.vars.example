@@ -1,0 +1,13 @@
+# Local development secrets — copy to `.dev.vars` and fill in.
+# NEVER commit the real .dev.vars file.
+
+# Your vibes.ai `meta_session` cookie value (required for server-side session)
+VIBES_META_SESSION=""
+
+# Optional: if set, clients must send THIS value as Bearer token
+# instead of the raw vibes cookie.
+VIBES_API_KEY=""
+
+# Optional: auth.meta.com cookie string for automatic session re-login
+# (DevTools → Application → Cookies → auth.meta.com)
+AUTH_META_COOKIES=""

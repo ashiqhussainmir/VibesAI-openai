@@ -1,0 +1,16 @@
+# Cloudflare Workers configuration — https://developers.cloudflare.com/workers/wrangler/configuration/
+name = "vibesai-openai"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Secrets (set with `npx wrangler secret put <NAME>`):
+#   VIBES_META_SESSION  — your vibes.ai meta_session cookie (server-side session)
+#   VIBES_API_KEY       — optional API key clients must send as Bearer token
+#   AUTH_META_COOKIES   — optional auth.meta.com cookies for automatic re-login
+#
+# Plain vars can go here directly:
+[vars]
+# CORS_ORIGIN = "*"
+# VIBES_BASE_URL = "https://vibes.ai"
+
+# Free plan is enough: this proxy streams responses and never stores state.
