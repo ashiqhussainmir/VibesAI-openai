@@ -47,6 +47,8 @@ cp .dev.vars.example .dev.vars   # fill in VIBES_META_SESSION
 npm run dev
 ```
 
+> 🍪 **Where do I get that cookie?** See **[COOKIES.md](COOKIES.md)** — a step-by-step guide for grabbing both `VIBES_META_SESSION` (the vibes.ai `meta_session` cookie) and `AUTH_META_COOKIES` (auth.meta.com cookies for automatic re-login) from your browser's DevTools, plus how to set them on Cloudflare, Node, and Docker.
+
 ```bash
 curl http://localhost:8787/v1/models -H "Authorization: Bearer anything"
 ```
@@ -80,6 +82,8 @@ You get `https://vibesai-openai.<your-subdomain>.workers.dev`. The free tier (10
 | `VIBES_BASE_URL` | no | Override upstream (default `https://vibes.ai`). |
 | `CORS_ORIGIN` | no | Reserved for CORS restriction (default: allow all). |
 
+> 🍪 **Full guide to getting and setting both cookies:** **[COOKIES.md](COOKIES.md)** — DevTools walkthroughs (Application tab + Network tab), format rules, per-platform setup (wrangler secrets, `.dev.vars`, Node, Docker, Cloudflare dashboard), and troubleshooting.
+
 ## Deploy elsewhere
 
 Any Node 18+ host:
@@ -108,6 +112,8 @@ vibes.ai sessions expire after ~30 min of inactivity. Two mitigations:
 
 1. The proxy keeps sessions alive passively while traffic flows.
 2. Set `AUTH_META_COOKIES` (auth.meta.com cookies from DevTools) and the proxy replays the Meta OIDC redirect chain to obtain a fresh `meta_session` automatically on 401s.
+
+Step-by-step instructions for both cookies: **[COOKIES.md](COOKIES.md)**.
 
 ## Usage with OpenAI SDKs
 

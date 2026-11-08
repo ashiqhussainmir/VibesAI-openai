@@ -1,13 +1,24 @@
 # Local development secrets — copy to `.dev.vars` and fill in.
-# NEVER commit the real .dev.vars file.
+# NEVER commit the real .dev.vars file (it's gitignored).
+#
+# Full step-by-step guide for BOTH cookies: COOKIES.md
 
-# Your vibes.ai `meta_session` cookie value (required for server-side session)
+# --- Required -----------------------------------------------------------
+# Your vibes.ai `meta_session` cookie — the server-side vibes session.
+# Get it: DevTools (F12) → Application → Cookies → https://vibes.ai
+#         → copy the VALUE of the row named "meta_session".
+# Format: one long token like "e60e910a-242a-....fGg" (UUID + dot + signature).
 VIBES_META_SESSION=""
 
-# Optional: if set, clients must send THIS value as Bearer token
+# --- Optional -----------------------------------------------------------
+# If set, clients must send THIS value as Bearer token
 # instead of the raw vibes cookie.
 VIBES_API_KEY=""
 
-# Optional: auth.meta.com cookie string for automatic session re-login
-# (DevTools → Application → Cookies → auth.meta.com)
+# auth.meta.com cookie string — enables automatic re-login when the vibes
+# session expires (~30 min idle). Easiest way to get it: DevTools → Network
+# tab → click any auth.meta.com request → Request Headers → Cookie →
+# copy the whole value. Format: "name=value; name=value; ..."
+# Example: "ps_n=1; ps_l=1; datr=Bxxx...; fs=1; locale=en_GB"
+# Setting it automatically enables auto re-login (no other flag needed).
 AUTH_META_COOKIES=""
