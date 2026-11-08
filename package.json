@@ -9,7 +9,8 @@
     "deploy": "wrangler deploy",
     "start:node": "tsx src/node.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx test/smoke.ts"
+    "test": "tsx test/smoke.ts",
+    "test:routes": "tsx test/verify-fix.ts"
   },
   "keywords": [
     "vibes.ai",

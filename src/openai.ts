@@ -9,13 +9,15 @@
  *   GET  /v1/videos/generations/:id/content  → download the MP4
  *   POST /v1/images/generations              → DALL-E-style image generation
  *   POST /v1/images/edits                    → image editing (upload + edit)
+ *   POST /v1/images/generations/edit         → same, JSON shape (z-ai SDK)
  *   POST /v1/audio/speech                    → OpenAI TTS-style speech synthesis
  *   GET  /v1/audio/voices                    → available TTS voices (convenience)
  */
 
 import type { AppContext } from "./app.js";
 import { streamSSE } from "hono/streaming";
-import { toBase64 } from "./utils.js";
+import { toBase64, fromBase64 } from "./utils.js";
+import { afterResponse, lookupEntId, registerGeneratedImage } from "./imagedit.js";
 import {
   AspectRatio,
   ImageModel,
@@ -499,11 +501,31 @@ export async function handleCreateImageGeneration(c: AppContext) {
       items.map(async (it: any) => {
         const datum: Record<string, unknown> = { revised_prompt: it.prompt ?? req.prompt };
         if (it.imageEntId) datum.image_ent_id = it.imageEntId;
-        if (responseFormat === "b64_json" && it.url) {
-          const img = await fetch(it.url);
-          datum.b64_json = toBase64(await img.arrayBuffer());
-        } else {
-          datum.url = it.url;
+        if (it.url) {
+          if (responseFormat === "b64_json") {
+            const img = await fetch(it.url);
+            const bytes = await img.arrayBuffer();
+            if (it.imageEntId) await registerGeneratedImage(bytes, String(it.imageEntId));
+            datum.b64_json = toBase64(bytes);
+          } else {
+            datum.url = it.url;
+            // Registry write (hash → entId) so later edit requests can
+            // match these exact bytes back to the vibes-side handle. Done
+            // via waitUntil where available — never delays the response.
+            if (it.imageEntId) {
+              await afterResponse(
+                c,
+                (async () => {
+                  try {
+                    const img = await fetch(it.url);
+                    await registerGeneratedImage(await img.arrayBuffer(), String(it.imageEntId));
+                  } catch {
+                    /* best-effort by design */
+                  }
+                })(),
+              );
+            }
+          }
         }
         return datum;
       }),
@@ -515,53 +537,165 @@ export async function handleCreateImageGeneration(c: AppContext) {
   }
 }
 
+interface JsonImageEditRequest {
+  model?: string;
+  prompt?: string;
+  /** data URL, https URL — JSON callers (incl. the z-ai SDK shape `images: [{url}]`). */
+  image?: string | { url?: string };
+  images?: (string | { url?: string })[];
+  size?: string;
+  response_format?: "url" | "b64_json";
+  project_id?: string;
+  source_image_ent_id?: string;
+}
+
+/** POST /v1/images/edits and /v1/images/generations/edit — image editing.
+ *
+ * Accepts BOTH request shapes:
+ *   - multipart/form-data (OpenAI SDK): `image` file, `prompt`, optional
+ *     `mask`, `source_image_ent_id`, `project_id`, `response_format`
+ *   - JSON (z-ai SDK / fetch): `{prompt, images: [{url}], size, response_format}`
+ *
+ * vibes.ai can only edit images IT generated (by internal ent_id). This
+ * handler therefore: (1) honors an explicit `source_image_ent_id`, else
+ * (2) hashes the submitted bytes and resolves them against the registry
+ * of images this proxy generated (generate → edit → edit chains work),
+ * else (3) uploads the image and attempts the edit — which the upstream
+ * currently refuses with a mapped, explanatory 422.
+ */
 export async function handleImageEdit(c: AppContext) {
   const client: VibesClient = c.get("vibesClient");
-  let form: Record<string, string | File>;
-  try {
-    form = await c.req.parseBody();
-  } catch {
-    return c.json(openaiError(400, "Expected multipart/form-data", "invalid_request_error"), 400);
+
+  let prompt: string | undefined;
+  let projectId: string | undefined;
+  let sourceEntId: string | undefined;
+  let imageUrl: string | undefined; // data URL or https URL (JSON body)
+  let imageFile: File | undefined; // multipart upload
+  let responseFormat: "url" | "b64_json" = "url";
+
+  const contentType = c.req.header("content-type") ?? "";
+  if (contentType.includes("multipart/form-data")) {
+    let form: Record<string, string | File>;
+    try {
+      form = await c.req.parseBody();
+    } catch {
+      return c.json(openaiError(400, "Invalid multipart/form-data body", "invalid_request_error"), 400);
+    }
+    prompt = typeof form["prompt"] === "string" ? (form["prompt"] as string) : undefined;
+    projectId = typeof form["project_id"] === "string" ? (form["project_id"] as string) : undefined;
+    sourceEntId = typeof form["source_image_ent_id"] === "string" ? (form["source_image_ent_id"] as string) : undefined;
+    responseFormat = form["response_format"] === "b64_json" ? "b64_json" : "url";
+    const img = form["image"];
+    if (img instanceof File) imageFile = img;
+    else if (typeof img === "string") imageUrl = img;
+  } else {
+    let req: JsonImageEditRequest;
+    try {
+      req = await c.req.json<JsonImageEditRequest>();
+    } catch {
+      return c.json(openaiError(400, "Invalid JSON body", "invalid_request_error"), 400);
+    }
+    prompt = typeof req.prompt === "string" ? req.prompt : undefined;
+    projectId = req.project_id;
+    sourceEntId = req.source_image_ent_id;
+    responseFormat = req.response_format === "b64_json" ? "b64_json" : "url";
+    // SDK shape first: images: [{url}] — also accept image: {url} / plain strings
+    const cand = req.images?.[0] ?? req.image;
+    if (typeof cand === "string") imageUrl = cand;
+    else if (cand && typeof cand === "object" && typeof (cand as { url?: string }).url === "string") {
+      imageUrl = (cand as { url: string }).url;
+    }
   }
-  const prompt = form["prompt"];
-  if (!prompt) {
+
+  if (!prompt || typeof prompt !== "string") {
     return c.json(openaiError(400, "`prompt` is required", "invalid_request_error"), 400);
   }
-  const projectId = typeof form["project_id"] === "string" ? (form["project_id"] as string) : undefined;
-  const sourceEntId = typeof form["source_image_ent_id"] === "string" ? (form["source_image_ent_id"] as string) : undefined;
-  const image = form["image"];
 
   try {
-    // Preferred path: vibes.ai only accepts edits on images it generated —
-    // pass `source_image_ent_id` (the `image_ent_id` from a prior
-    // /v1/images/generations response).
     let imageEntId = sourceEntId;
     if (!imageEntId) {
-      if (!(image instanceof File)) {
+      let bytes: ArrayBuffer | null = null;
+      let b64: string | undefined;
+
+      if (imageFile) {
+        bytes = await imageFile.arrayBuffer();
+        b64 = toBase64(bytes);
+      } else if (imageUrl) {
+        if (imageUrl.startsWith("data:")) {
+          b64 = imageUrl.slice(imageUrl.indexOf(",") + 1);
+          bytes = fromBase64(b64).buffer as ArrayBuffer;
+        } else if (/^https?:\/\//.test(imageUrl)) {
+          const r = await fetch(imageUrl);
+          if (!r.ok) {
+            return c.json(
+              openaiError(400, `could not fetch the image at the given URL (HTTP ${r.status})`, "invalid_request_error"),
+              400,
+            );
+          }
+          bytes = await r.arrayBuffer();
+          b64 = toBase64(bytes);
+        }
+      }
+
+      if (!bytes || !b64) {
         return c.json(
           openaiError(
             400,
-            "Provide either `source_image_ent_id` (image_ent_id from a prior generation) or an `image` file.",
+            "Provide an `image` (file, data URL or https URL; JSON callers may use `images: [{url}]`) or a `source_image_ent_id`.",
             "invalid_request_error",
           ),
           400,
         );
       }
-      const b64 = toBase64(await image.arrayBuffer());
-      const upload = await client.uploadImage(b64);
-      imageEntId = upload.mediaEntId;
+
+      // Preferred path: these exact bytes were generated by this proxy →
+      // the registry recovers their vibes-side ent_id and the edit proceeds.
+      const known = await lookupEntId(bytes);
+      if (known) {
+        imageEntId = known;
+      } else {
+        // Unknown image — upload it and attempt the edit anyway. The
+        // upstream currently refuses edits of uploaded images; the mapped
+        // 422 below explains the limitation instead of leaking it.
+        const upload = await client.uploadImage(b64);
+        imageEntId = upload?.mediaEntId ?? upload?.image_ent_id;
+        if (!imageEntId) throw new Error("image upload returned no mediaEntId");
+      }
     }
 
-    const edit = await client.editImage(imageEntId ?? "", String(prompt), projectId);
+    const edit = await client.editImage(imageEntId!, String(prompt), projectId);
     const item = edit?.contentItem ?? {};
     const datum: Record<string, unknown> = { revised_prompt: String(prompt) };
     const url = item.imageUrl ?? item.url ?? edit?.imageUrl;
-    if (url) {
+    const resultEntId = item.imageEntId ?? item.id;
+
+    if (url && responseFormat === "b64_json") {
+      const r = await fetch(url);
+      const bytes = await r.arrayBuffer();
+      if (resultEntId) await registerGeneratedImage(bytes, String(resultEntId));
+      datum.b64_json = toBase64(bytes);
+    } else if (url) {
       datum.url = url;
     } else if (item.imageBase64) {
       datum.b64_json = item.imageBase64;
     }
-    if (item.id || item.imageEntId) datum.image_ent_id = item.imageEntId ?? item.id;
+    if (resultEntId) datum.image_ent_id = resultEntId;
+
+    // Register the result (async where possible) so edit-of-an-edit works.
+    if (url && resultEntId && responseFormat !== "b64_json") {
+      await afterResponse(
+        c,
+        (async () => {
+          try {
+            const r = await fetch(url);
+            await registerGeneratedImage(await r.arrayBuffer(), String(resultEntId));
+          } catch {
+            /* best-effort by design */
+          }
+        })(),
+      );
+    }
+
     return c.json({ created: Math.floor(Date.now() / 1000), data: [datum] });
   } catch (e: any) {
     const msg = e?.message ?? String(e);
@@ -569,7 +703,7 @@ export async function handleImageEdit(c: AppContext) {
       return c.json(
         openaiError(
           422,
-          "vibes.ai only allows editing images it generated. Re-run with `source_image_ent_id` = the `image_ent_id` field returned by /v1/images/generations.",
+          "vibes.ai can only edit images it generated. Images produced through this API (generations and previous edits) are matched automatically — if this image was generated here, retry; the upstream may have expired it (fbcdn links live a few days). Arbitrary uploaded images cannot be edited by vibes.ai; use a provider that supports editing arbitrary images for those.",
           "invalid_request_error",
           "source_image_not_editable",
         ),

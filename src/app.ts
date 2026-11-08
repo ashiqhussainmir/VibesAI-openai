@@ -144,7 +144,7 @@ export function createApp(envSource: EnvSource): Hono<AppEnv> {
     c.json({
       name: "VibesAI OpenAI-compatible API",
       version: "1.0.0",
-      docs: "/v1/models, /v1/chat/completions, /v1/videos/generations, /v1/images/generations, /v1/images/edits, /v1/audio/speech, /vibes/*",
+      docs: "/v1/models, /v1/chat/completions, /v1/videos/generations, /v1/images/generations, /v1/images/edits, /v1/images/generations/edit, /v1/audio/speech, /vibes/*",
       openapi_compatible: true,
     }),
   );
@@ -173,6 +173,8 @@ export function createApp(envSource: EnvSource): Hono<AppEnv> {
 
   app.post("/v1/images/generations", handleCreateImageGeneration);
   app.post("/v1/images/edits", handleImageEdit);
+  // z-ai SDK / Canvix shape — the SDK posts JSON to {base}/images/generations/edit
+  app.post("/v1/images/generations/edit", handleImageEdit);
 
   app.post("/v1/audio/speech", handleSpeech);
   app.get("/v1/audio/voices", handleListVoices);

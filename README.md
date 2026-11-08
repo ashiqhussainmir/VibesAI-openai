@@ -25,7 +25,8 @@ Point any OpenAI SDK / tool at this server and use vibes.ai's video generation, 
 | `GET /v1/videos/generations/{id}` | Poll generation status + progress |
 | `GET /v1/videos/generations/{id}/content` | Download the finished MP4 |
 | `POST /v1/images/generations` | DALL-E-style image generation (sync, `url` or `b64_json`) |
-| `POST /v1/images/edits` | Image editing (multipart upload + edit) |
+| `POST /v1/images/edits` | Image editing — multipart (OpenAI SDK) **or** JSON (`image` / `images: [{url}]` as data/https URL) |
+| `POST /v1/images/generations/edit` | Same handler, the route the z-ai SDK (`zai.images.generations.edit`) posts to |
 | `POST /v1/audio/speech` | OpenAI TTS-style speech synthesis (41 PlayAI voices) |
 | `GET /v1/audio/voices` | Voice catalog (convenience extra) |
 | `ALL /vibes/*` | **Raw passthrough** to the entire vibes.ai API (projects, batches, ingredients, moodboards, music, lipsync, exports, share links…) |
@@ -190,7 +191,11 @@ curl "http://localhost:8787/vibes/api/projects?limit=5" -H "Authorization: Beare
 
 - `size` maps to vibes aspect ratios: `1024x1024`→`1:1`, `1024x1792`→`9:16`, `1792x1024`→`16:9`.
 - `response_format`: `url` (default, vibes CDN link) or `b64_json`.
-- Each returned datum also carries the vibes `image_ent_id` — **keep it**: `POST /v1/images/edits` requires it as `source_image_ent_id` (vibes.ai only allows editing images it generated; uploaded files get a clear 422 explaining this).
+- Editing: vibes.ai can **only edit images it generated** (internal ent_id). Two ways to get there:
+  - **Automatic** — the proxy hashes every image it generates (and every edit result) and records `sha256(bytes) → ent_id` in a per-colo registry (Cache API, 7-day TTL). When an edit request carries image bytes whose hash matches, the ent_id is recovered and the edit proceeds — no client bookkeeping needed. Generate → edit → edit chains just work; pass images as a file, data URL or https URL.
+  - **Explicit** — pass `source_image_ent_id` (the `image_ent_id` from a previous response).
+  - Arbitrary images that were never generated through this proxy get a clear `422 source_image_not_editable` explaining the upstream limitation.
+- `POST /v1/images/generations/edit` is the same handler as `/v1/images/edits` — it exists because the z-ai SDK (`zai.images.generations.edit`, used by Canvix and friends) posts JSON to `{base}/images/generations/edit`.
 - Advanced controls (vibe model, resolution, ingredients, moodboards) via the optional `vibes` object in the request body.
 
 ### Videos
