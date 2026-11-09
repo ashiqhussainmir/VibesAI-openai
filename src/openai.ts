@@ -669,7 +669,13 @@ export async function handleImageEdit(c: AppContext) {
     const item = edit?.contentItem ?? {};
     const datum: Record<string, unknown> = { revised_prompt: String(prompt) };
     const url = item.imageUrl ?? item.url ?? edit?.imageUrl;
-    const resultEntId = item.imageEntId ?? item.id;
+    // vibes' edit response carries TWO ids: `mediaEntId` (numeric media
+    // entity — the ONLY id /api/generate/image-edit accepts as a source)
+    // and `id` (content-item UUID — vibes answers "You do not have
+    // access" for it). Resolve mediaEntId first, else edit-of-edit
+    // chains register and echo an id the upstream refuses (the v1.0.2
+    // bug: chains matched in the registry but died upstream with 422).
+    const resultEntId = item.mediaEntId ?? item.imageEntId ?? item.id;
 
     if (url && responseFormat === "b64_json") {
       const r = await fetch(url);

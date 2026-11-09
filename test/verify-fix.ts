@@ -84,5 +84,59 @@ function check(name: string, cond: boolean, detail = ""): void {
   check("source_image_ent_id path passes parsing", res.status !== 400, `HTTP ${res.status}: ${txt.slice(0, 80)}`);
 }
 
+// 7) edit-result id resolution — the v1.0.2 bug. vibes' edit response
+//    carries contentItem.mediaEntId (numeric, the ONLY id the upstream
+//    accepts as an edit source) alongside contentItem.id (content-item
+//    UUID, refused with "You do not have access"). The handler must
+//    echo and REGISTER mediaEntId, else edit-of-edit chains die 422.
+{
+  const realFetch = globalThis.fetch;
+  const IMG = new Uint8Array([11, 22, 33, 44, 55, 66, 77, 88]);
+  const MEDIA_ENT_ID = 1351756008030936;
+  const UUID = "c8aba8b1-5deb-409d-a382-0da11c835a6c";
+  globalThis.fetch = (async (input: RequestInfo | URL): Promise<Response> => {
+    const u = String(typeof input === "string" ? input : (input as Request).url ?? input);
+    if (u.includes("/api/generate/image-edit")) {
+      // the real vibes.ai response shape (captured live 2026-11-08)
+      return new Response(JSON.stringify({
+        success: true,
+        contentItem: {
+          id: UUID,
+          type: "images",
+          isLoading: false,
+          imageUrl: "https://stub.fbcdn.net/result.jpg",
+          imageHandle: null,
+          mediaEntId: MEDIA_ENT_ID,
+          imagePrompt: "stubbed",
+          structuredOutput: { editedFrom: 1351749874698216 },
+        },
+        batchId: "b-1",
+        requestId: "r-1",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (u.includes("stub.fbcdn.net")) return new Response(IMG, { status: 200 });
+    return new Response(JSON.stringify({ error: { message: `stub miss: ${u}` } }), { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const res = await app.request("/v1/images/generations/edit", {
+      method: "POST",
+      headers: H,
+      body: JSON.stringify({ prompt: "make it blue", source_image_ent_id: "1351749874698216" }),
+    });
+    const body = await res.json() as { data?: Array<{ url?: string; image_ent_id?: unknown }> };
+    const entId = body.data?.[0]?.image_ent_id;
+    check("edit result echoes mediaEntId, not the contentItem UUID",
+      res.status === 200 && String(entId) === String(MEDIA_ENT_ID),
+      `HTTP ${res.status} image_ent_id=${String(entId)}`);
+    const known = await lookupEntId(IMG.buffer as ArrayBuffer);
+    check("edit result bytes registered under mediaEntId",
+      known === String(MEDIA_ENT_ID), `registry=${known}`);
+    check("registry did not map the result to the refused UUID", known !== UUID);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
